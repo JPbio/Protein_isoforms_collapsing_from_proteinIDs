@@ -63,3 +63,87 @@ If you want, I can also give you:
 a short tagline
 a README.md version with badges
 or a methods paragraph for your paper 
+
+
+## 📥 Input requirements
+
+### 1. Protein list (for `-l` mode)
+A plain text file with one protein accession per line:
+
+XP_015836279.1  
+XP_015836280.2  
+
+---
+
+### 2. BLAST/DIAMOND table (for `-t` mode)
+
+Tab-separated file with the following header:
+
+qseqid  qlen  qstart  qend  length  qcovhsp  pident  sseqid  slen  sstart  send  scovhsp  evalue  bitscore ...
+
+---
+
+### 3. Gene mapping file (`-g2a`)
+
+NCBI gene–protein mapping file required to link protein accessions to GeneIDs.
+
+Accepted files:
+
+- `gene2accession`
+- `gene2refseq`
+
+These files can be downloaded from the NCBI FTP:
+
+- https://ftp.ncbi.nlm.nih.gov/gene/DATA/gene2accession.gz  
+- https://ftp.ncbi.nlm.nih.gov/gene/DATA/gene2refseq.gz  
+
+Both compressed (`.gz`) and uncompressed formats are supported.
+
+Tip: `gene2refseq` is often preferred for RefSeq-based analyses, while `gene2accession` provides broader coverage including GenBank entries.
+
+
+Minimal example
+
+            python script.py \
+              -l proteins.txt \
+              -g2a gene2accession.gz
+
+Table mode
+
+            python script.py \
+              -t results.tsv \
+              -g2a gene2accession.gz \
+              -prefix my_run
+
+
+## 📤 Outputs
+
+### List mode
+- `.protein_to_gene.tsv` → mapping table
+- `.isoform_groups.tsv` → gene-based isoforms
+- `.groups.tsv` → full grouping report
+- `.summary.txt` → statistics
+
+### Table mode
+- `.annotated.tsv` → full annotated table
+- `.filtered.tsv` → non-redundant representatives
+- `.groups.tsv` → grouping relationships
+- `.summary.txt` → statistics
+
+
+## ⚠️ Notes
+
+- Isoform collapsing outside RefSeq is heuristic-based
+- Unmapped proteins are grouped using alignment similarity, not sequence identity
+- Results represent functional redundancy, not strict transcript isoforms
+
+  
+
+
+
+
+
+
+
+
+
