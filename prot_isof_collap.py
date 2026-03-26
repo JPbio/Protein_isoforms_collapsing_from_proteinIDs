@@ -41,6 +41,13 @@ Why this is needed:
 - Therefore, in table mode, the script also applies heuristics to collapse
   likely redundant unmapped proteins based on alignment behavior
 
+Taxonomy-aware heuristic:
+- Raw staxids fields in nr can contain multiple taxids separated by ';'
+- In table mode, two rows are considered from the same taxonomic context if
+  their taxid sets share at least one taxid
+- This overlap-aware rule is applied when grouping mapped proteins with the
+  same GeneID and when comparing/collapsing unmapped proteins
+
 Author intent:
 - Provide a practical preprocessing step for phylogeny, domain analysis,
   homology-based discovery, and redundancy reduction in large protein hit sets
@@ -54,8 +61,6 @@ import csv
 from collections import defaultdict
 
 
-# Expected header for table mode (-t).
-# The script checks that all these columns are present.
 EXPECTED_HEADER = [
     "qseqid", "qlen", "qstart", "qend", "length", "qcovhsp", "pident",
     "sseqid", "slen", "sstart", "send", "scovhsp", "evalue", "bitscore",
@@ -65,51 +70,26 @@ EXPECTED_HEADER = [
 
 
 def status(message):
-    """
-    Print progress and status messages to stderr.
-
-    Why stderr?
-    - keeps progress separate from data files
-    - easier to redirect stdout if needed in future
-    """
+    """Print progress messages to stderr."""
     sys.stderr.write(f"[INFO] {message}\n")
 
 
 def open_maybe_gzip(path):
-    """
-    Open a plain text or .gz file transparently.
-
-    Parameters
-    ----------
-    path : str
-        File path.
-
-    Returns
-    -------
-    file handle
-        Open text handle.
-    """
+    """Open a plain-text or .gz file transparently."""
     if path.endswith(".gz"):
         return gzip.open(path, "rt", newline="")
     return open(path, "r", newline="")
 
 
 def infer_prefix(path):
-    """
-    Infer output prefix from the input filename.
-
-    Example
-    -------
-    'yakuba.tsv' -> 'yakuba'
-    'hits.final.txt' -> 'hits'
-    """
+    """Infer output prefix from input filename."""
     base = os.path.basename(path)
     return base.split(".")[0]
 
 
 def strip_version(accession):
     """
-    Remove trailing accession version.
+    Remove accession version suffix.
 
     Examples
     --------
@@ -120,12 +100,7 @@ def strip_version(accession):
 
 
 def safe_int(x, default=0):
-    """
-    Convert a value to int safely.
-
-    Useful for sorting numeric columns that may occasionally be empty
-    or malformed.
-    """
+    """Convert a value to int safely."""
     try:
         return int(str(x).strip())
     except Exception:
@@ -134,13 +109,11 @@ def safe_int(x, default=0):
 
 def gene_sort_value(gene_id):
     """
-    Sorting helper for GeneID columns.
+    Sorting helper for GeneID values.
 
-    Behavior
-    --------
     - numeric GeneIDs sort numerically
-    - NA goes last
-    - non-numeric strings sort after numeric GeneIDs but before NA
+    - NA sorts last
+    - non-numeric values sort after numeric GeneIDs but before NA
     """
     gene_id = str(gene_id).strip()
     if gene_id == "NA":
@@ -148,6 +121,122 @@ def gene_sort_value(gene_id):
     if gene_id.isdigit():
         return (0, int(gene_id))
     return (0, gene_id)
+
+
+def parse_taxid_set(staxids):
+    """
+    Parse NCBI staxids field into a set of taxid strings.
+
+    Example
+    -------
+    '7227;32630' -> {'7227', '32630'}
+    """
+    vals = set()
+    for x in str(staxids).split(";"):
+        x = x.strip()
+        if x:
+            vals.add(x)
+    return vals
+
+
+def taxid_overlap(a, b):
+    """
+    Return True if two rows or two taxid sets share at least one taxid.
+
+    Parameters
+    ----------
+    a, b : dict or set
+        Either annotated rows containing '_taxid_set' or raw taxid sets
+    """
+    if isinstance(a, dict):
+        a = a["_taxid_set"]
+    if isinstance(b, dict):
+        b = b["_taxid_set"]
+    return len(a.intersection(b)) > 0
+
+
+def merged_taxid_string(rows):
+    """
+    Return a canonical semicolon-separated union of taxids for a row group.
+    """
+    all_taxids = set()
+    for row in rows:
+        all_taxids.update(row["_taxid_set"])
+
+    def tax_key(x):
+        return (0, int(x)) if x.isdigit() else (1, x)
+
+    return ";".join(sorted(all_taxids, key=tax_key))
+
+
+def alignment_profile(row):
+    """
+    Return the alignment profile used for heuristic collapsing of unmapped rows.
+
+    This intentionally excludes taxonomy because taxonomy overlap is tested
+    separately.
+    """
+    return (
+        str(row["slen"]).strip(),
+        str(row["sstart"]).strip(),
+        str(row["send"]).strip(),
+        str(row["scovhsp"]).strip()
+    )
+
+
+def same_alignment_profile(row_a, row_b):
+    """Return True if two rows share the same alignment profile."""
+    return alignment_profile(row_a) == alignment_profile(row_b)
+
+
+def cluster_rows(rows, can_link):
+    """
+    Cluster rows into connected components using a pairwise linkage rule.
+
+    Parameters
+    ----------
+    rows : list[dict]
+        Rows to cluster
+    can_link : callable
+        Function(row_a, row_b) -> bool
+
+    Returns
+    -------
+    list[list[dict]]
+        Connected components
+    """
+    n = len(rows)
+    if n == 0:
+        return []
+
+    adjacency = [[] for _ in range(n)]
+    for i in range(n):
+        for j in range(i + 1, n):
+            if can_link(rows[i], rows[j]):
+                adjacency[i].append(j)
+                adjacency[j].append(i)
+
+    seen = [False] * n
+    components = []
+
+    for i in range(n):
+        if seen[i]:
+            continue
+        stack = [i]
+        seen[i] = True
+        comp_idx = []
+
+        while stack:
+            cur = stack.pop()
+            comp_idx.append(cur)
+            for nxt in adjacency[cur]:
+                if not seen[nxt]:
+                    seen[nxt] = True
+                    stack.append(nxt)
+
+        components.append([rows[k] for k in comp_idx])
+
+    return components
 
 
 # =========================================================
@@ -163,13 +252,6 @@ def build_gene_mapping(accessions, gene_file):
     1. Exact accession match is preferred
     2. If exact match is unavailable, use version-stripped match
 
-    Parameters
-    ----------
-    accessions : list[str]
-        Protein accessions to map.
-    gene_file : str
-        gene2accession or gene2refseq file (.gz or plain text)
-
     Returns
     -------
     mapping : dict
@@ -183,7 +265,6 @@ def build_gene_mapping(accessions, gene_file):
     wanted_exact = set(accessions)
     wanted_base = {strip_version(x) for x in accessions}
 
-    # Databases built from the NCBI mapping file.
     exact_db = {}
     base_db = {}
 
@@ -201,9 +282,6 @@ def build_gene_mapping(accessions, gene_file):
             if len(fields) < 6:
                 continue
 
-            # NCBI columns:
-            # field[1] = GeneID
-            # field[5] = protein_accession.version
             gene_id = fields[1].strip()
             protein_acc = fields[5].strip()
 
@@ -212,8 +290,6 @@ def build_gene_mapping(accessions, gene_file):
 
             base_acc = strip_version(protein_acc)
 
-            # Save only the first observed mapping per accession/base.
-            # This is consistent with previous script behavior.
             if protein_acc in wanted_exact and protein_acc not in exact_db:
                 exact_db[protein_acc] = gene_id
 
@@ -283,9 +359,7 @@ def read_protein_list(path):
 
 
 def build_gene_to_proteins(mapping):
-    """
-    Reverse accession -> GeneID mapping into GeneID -> [proteins].
-    """
+    """Reverse accession -> GeneID mapping into GeneID -> [proteins]."""
     gene_to_proteins = defaultdict(list)
     for protein, gene_id in mapping.items():
         gene_to_proteins[gene_id].append(protein)
@@ -372,9 +446,7 @@ def write_list_groups_report(protein_list, mapping, out_groups):
 
 
 def write_list_unmapped(protein_list, mapping, out_unmapped):
-    """
-    Write unmapped proteins as a simple text list.
-    """
+    """Write unmapped proteins as a simple text list."""
     status(f"Writing: {out_unmapped}")
 
     unmapped = [p for p in protein_list if p not in mapping]
@@ -387,9 +459,7 @@ def write_list_unmapped(protein_list, mapping, out_unmapped):
 
 
 def write_list_summary(protein_list, mapping, match_type, gene_to_proteins, out_summary):
-    """
-    Write summary statistics for list mode.
-    """
+    """Write summary statistics for list mode."""
     status(f"Writing: {out_summary}")
 
     total = len(protein_list)
@@ -413,9 +483,7 @@ def write_list_summary(protein_list, mapping, match_type, gene_to_proteins, out_
 
 
 def run_list_mode(protein_file, gene_file, prefix):
-    """
-    Execute list mode workflow.
-    """
+    """Execute list mode workflow."""
     proteins = read_protein_list(protein_file)
     mapping, match_type = build_gene_mapping(proteins, gene_file)
     gene_to_proteins = build_gene_to_proteins(mapping)
@@ -476,8 +544,10 @@ def read_full_table(path, mapping, match_type):
     Representative_of
     Isoform_signature
 
-    Isoform_signature is used for unmapped redundancy heuristics:
-    staxids|slen|sstart|send|scovhsp
+    Isoform_signature stores only the alignment profile:
+    slen|sstart|send|scovhsp
+
+    Taxonomic comparison is handled separately using overlap of taxid sets.
     """
     status(f"Reading full table and annotating rows: {path}")
     rows = []
@@ -487,19 +557,17 @@ def read_full_table(path, mapping, match_type):
 
         for idx, row in enumerate(reader, 1):
             sseqid = row["sseqid"].strip()
-            staxids = row["staxids"].strip()
             gene_id = mapping.get(sseqid, "NA")
             mtype = match_type.get(sseqid, "unmapped")
 
             row["_row_index"] = idx
+            row["_taxid_set"] = parse_taxid_set(row["staxids"])
             row["GeneID"] = gene_id
             row["Match_type"] = mtype
             row["Selected"] = "no"
             row["Selection_reason"] = "not_selected"
             row["Representative_of"] = ""
-            row["Isoform_signature"] = (
-                f"{staxids}|{row['slen']}|{row['sstart']}|{row['send']}|{row['scovhsp']}"
-            )
+            row["Isoform_signature"] = "|".join(alignment_profile(row))
             rows.append(row)
 
     status(f"Annotated {len(rows)} rows")
@@ -528,16 +596,21 @@ def select_representatives(rows):
     Logic
     -----
     Mapped rows:
-      - grouped by (staxids, GeneID)
-      - if only one row -> selected as unique
-      - if multiple rows -> longest slen wins (ties broken as above)
+      - grouped first by GeneID
+      - inside each GeneID, rows are further split by taxid-overlap components
+      - if only one row in a component -> selected as unique
+      - if multiple rows in a component -> longest slen wins
+        (ties: exact > version_stripped > first occurrence)
 
     Unmapped rows:
-      - if only one unmapped row for a taxid -> selected as unmatched,
-        unless an identical signature is already represented
-      - remaining unmapped rows are grouped by Isoform_signature
-      - first occurrence becomes unmatched_signature representative,
-        unless identical signature already represented
+      - first compared against selected mapped representatives
+      - if taxids overlap AND alignment profile is identical, the unmapped row
+        is assigned to that mapped representative and not selected
+      - remaining unmapped rows are clustered by:
+            taxid overlap AND identical alignment profile
+      - singleton clusters are selected as unmatched
+      - clusters with >1 row are selected as unmatched_signature, keeping
+        the first occurrence
 
     Returns
     -------
@@ -546,80 +619,87 @@ def select_representatives(rows):
     selected_rows : list[dict]
         Only rows with Selected == yes
     """
-    mapped_by_tax_gene = defaultdict(list)
-    unmapped_by_taxid = defaultdict(list)
+    mapped_by_gene = defaultdict(list)
+    unmapped_rows = []
 
     for row in rows:
         if row["GeneID"] != "NA":
-            key = (row["staxids"].strip(), row["GeneID"])
-            mapped_by_tax_gene[key].append(row)
+            mapped_by_gene[row["GeneID"]].append(row)
         else:
-            key = row["staxids"].strip()
-            unmapped_by_taxid[key].append(row)
+            unmapped_rows.append(row)
 
-    # First process mapped rows.
-    for key, group in mapped_by_tax_gene.items():
-        group_sorted = sorted(group, key=representative_key)
-        winner = group_sorted[0]
+    selected_mapped_rows = []
 
-        if len(group) == 1:
-            winner["Selected"] = "yes"
-            winner["Selection_reason"] = "unique"
-        else:
-            winner["Selected"] = "yes"
-            winner["Selection_reason"] = "biggest"
+    # -----------------------------------------------------
+    # 1) Resolve mapped rows by GeneID + taxid-overlap
+    # -----------------------------------------------------
+    for gene_id, gene_rows in mapped_by_gene.items():
+        components = cluster_rows(gene_rows, lambda a, b: taxid_overlap(a, b))
 
-        winner["Representative_of"] = f"{key[0]}|{key[1]}"
+        for comp in components:
+            comp_sorted = sorted(comp, key=representative_key)
+            winner = comp_sorted[0]
+            merged_taxids = merged_taxid_string(comp)
+            group_id = f"{merged_taxids}|{gene_id}"
 
-        for loser in group_sorted[1:]:
-            loser["Selection_reason"] = f"same_gene_as_selected:{winner['sseqid']}"
-
-    # Track already selected signatures to avoid duplicate unmapped reps.
-    selected_signature_to_row = {}
-    for row in rows:
-        if row["Selected"] == "yes":
-            sig = row["Isoform_signature"]
-            if sig not in selected_signature_to_row:
-                selected_signature_to_row[sig] = row
-
-    # Unmapped rows that are unique for their taxid.
-    for staxid, group in unmapped_by_taxid.items():
-        if len(group) == 1:
-            row = group[0]
-            sig = row["Isoform_signature"]
-
-            if sig in selected_signature_to_row:
-                row["Selection_reason"] = (
-                    f"same_isoform_signature_as_selected:{selected_signature_to_row[sig]['sseqid']}"
-                )
+            if len(comp) == 1:
+                winner["Selected"] = "yes"
+                winner["Selection_reason"] = "unique"
             else:
-                row["Selected"] = "yes"
-                row["Selection_reason"] = "unmatched"
-                row["Representative_of"] = f"{staxid}|UNMATCHED"
-                selected_signature_to_row[sig] = row
+                winner["Selected"] = "yes"
+                winner["Selection_reason"] = "biggest"
 
-    # Remaining unmapped rows grouped by signature.
-    unmapped_by_signature = defaultdict(list)
-    for row in rows:
-        if row["GeneID"] == "NA" and row["Selected"] != "yes":
-            unmapped_by_signature[row["Isoform_signature"]].append(row)
+            winner["Representative_of"] = group_id
+            selected_mapped_rows.append(winner)
 
-    for sig, group in unmapped_by_signature.items():
-        if sig in selected_signature_to_row:
-            rep = selected_signature_to_row[sig]
-            for row in group:
-                row["Selection_reason"] = f"same_isoform_signature_as_selected:{rep['sseqid']}"
-            continue
+            for loser in comp_sorted[1:]:
+                loser["Representative_of"] = group_id
+                loser["Selection_reason"] = f"same_gene_as_selected:{winner['sseqid']}"
 
-        winner = min(group, key=lambda r: r["_row_index"])
-        winner["Selected"] = "yes"
-        winner["Selection_reason"] = "unmatched_signature"
-        winner["Representative_of"] = f"{winner['staxids']}|SIGNATURE"
-        selected_signature_to_row[sig] = winner
+    # -----------------------------------------------------
+    # 2) Compare unmapped rows against selected mapped reps
+    # -----------------------------------------------------
+    remaining_unmapped = []
 
-        for row in group:
-            if row["_row_index"] != winner["_row_index"]:
-                row["Selection_reason"] = f"same_isoform_signature_as_selected:{winner['sseqid']}"
+    for row in unmapped_rows:
+        assigned = False
+        for mapped_rep in selected_mapped_rows:
+            if taxid_overlap(row, mapped_rep) and same_alignment_profile(row, mapped_rep):
+                row["Representative_of"] = mapped_rep["Representative_of"]
+                row["Selection_reason"] = f"same_isoform_signature_as_selected:{mapped_rep['sseqid']}"
+                assigned = True
+                break
+
+        if not assigned:
+            remaining_unmapped.append(row)
+
+    # -----------------------------------------------------
+    # 3) Collapse remaining unmapped rows among themselves
+    #    using taxid-overlap + identical alignment profile
+    # -----------------------------------------------------
+    def unmapped_link(a, b):
+        return taxid_overlap(a, b) and same_alignment_profile(a, b)
+
+    unmapped_components = cluster_rows(remaining_unmapped, unmapped_link)
+
+    for comp in unmapped_components:
+        comp_sorted = sorted(comp, key=lambda r: r["_row_index"])
+        winner = comp_sorted[0]
+        merged_taxids = merged_taxid_string(comp)
+        group_id = f"{merged_taxids}|{winner['Isoform_signature']}"
+
+        if len(comp) == 1:
+            winner["Selected"] = "yes"
+            winner["Selection_reason"] = "unmatched"
+        else:
+            winner["Selected"] = "yes"
+            winner["Selection_reason"] = "unmatched_signature"
+
+        winner["Representative_of"] = group_id
+
+        for loser in comp_sorted[1:]:
+            loser["Representative_of"] = group_id
+            loser["Selection_reason"] = f"same_isoform_signature_as_selected:{winner['sseqid']}"
 
     selected_rows = [r for r in rows if r["Selected"] == "yes"]
     return rows, selected_rows
@@ -630,15 +710,27 @@ def sort_table_rows_for_output(rows):
     Sort table-mode rows for cleaner inspection.
 
     Primary keys:
-    - taxid
+    - minimal taxid in the set (approximate display sort)
     - GeneID
     - sseqid
     - original row index
     """
+    def display_tax_key(row):
+        if not row["_taxid_set"]:
+            return (1, float("inf"))
+        vals = sorted(
+            row["_taxid_set"],
+            key=lambda x: (0, int(x)) if x.isdigit() else (1, x)
+        )
+        first = vals[0]
+        if first.isdigit():
+            return (0, int(first))
+        return (0, first)
+
     return sorted(
         rows,
         key=lambda r: (
-            r["staxids"].strip(),
+            display_tax_key(r),
             gene_sort_value(r["GeneID"]),
             r["sseqid"],
             r["_row_index"]
@@ -647,9 +739,7 @@ def sort_table_rows_for_output(rows):
 
 
 def write_annotated_table(rows, out_path):
-    """
-    Write full annotated table in table mode.
-    """
+    """Write full annotated table in table mode."""
     status(f"Writing annotated table: {out_path}")
 
     out_fields = EXPECTED_HEADER + [
@@ -672,9 +762,7 @@ def write_annotated_table(rows, out_path):
 
 
 def write_filtered_table(rows, out_path):
-    """
-    Write only selected representative rows in table mode.
-    """
+    """Write only selected representative rows in table mode."""
     status(f"Writing filtered representatives: {out_path}")
 
     out_fields = EXPECTED_HEADER + [
@@ -700,29 +788,17 @@ def write_table_groups_report(all_rows, selected_rows, out_path):
     """
     Write grouping report for table mode.
 
-    Includes:
-    - mapped_gene groups: grouped by (TaxID, GeneID)
-    - unmapped_signature groups: clustered unmapped proteins
-    - unmapped_single groups: isolated unmapped proteins
-
-    This report is especially useful to inspect which proteins were collapsed
-    together and which representative was retained.
+    Groups are defined by Representative_of, so the report captures:
+    - mapped_gene groups (including any unmapped rows absorbed into them)
+    - unmapped_signature groups
+    - unmapped_single groups
     """
     status(f"Writing group report: {out_path}")
 
-    mapped_groups = defaultdict(list)
-    unmapped_signature_groups = defaultdict(list)
-
+    groups = defaultdict(list)
     for row in all_rows:
-        sseqid = row["sseqid"]
-        staxid = row["staxids"].strip()
-        gene_id = row["GeneID"]
-        sig = row["Isoform_signature"]
-
-        if gene_id != "NA":
-            mapped_groups[(staxid, gene_id)].append(row)
-        else:
-            unmapped_signature_groups[(staxid, sig)].append(row)
+        group_id = row["Representative_of"] if row["Representative_of"] else f"UNASSIGNED|{row['_row_index']}"
+        groups[group_id].append(row)
 
     with open(out_path, "w") as out:
         out.write(
@@ -730,60 +806,48 @@ def write_table_groups_report(all_rows, selected_rows, out_path):
             "Selected_representative\tSelection_reason\n"
         )
 
-        mapped_keys = sorted(
-            mapped_groups.keys(),
-            key=lambda x: (safe_int(x[0], 0), gene_sort_value(x[1]))
-        )
-
-        for staxid, gene_id in mapped_keys:
-            group_rows = mapped_groups[(staxid, gene_id)]
-            proteins = sorted({r["sseqid"] for r in group_rows})
-
-            selected_rep = "NA"
-            selected_reason = "NA"
-            for row in group_rows:
-                if row["Selected"] == "yes":
-                    selected_rep = row["sseqid"]
-                    selected_reason = row["Selection_reason"]
-                    break
-
-            out.write(
-                f"mapped_gene\t{staxid}\t{gene_id}\t{len(proteins)}\t"
-                f"{','.join(proteins)}\t{selected_rep}\t{selected_reason}\n"
-            )
-
-        unmapped_keys = sorted(
-            unmapped_signature_groups.keys(),
-            key=lambda x: (safe_int(x[0], 0), x[1])
-        )
-
-        for staxid, sig in unmapped_keys:
-            group_rows = unmapped_signature_groups[(staxid, sig)]
-            proteins = sorted({r["sseqid"] for r in group_rows})
-
-            selected_rep = "NA"
-            selected_reason = "NA"
-            for row in group_rows:
-                if row["Selected"] == "yes":
-                    selected_rep = row["sseqid"]
-                    selected_reason = row["Selection_reason"]
-                    break
-
-            if len(proteins) == 1:
-                group_type = "unmapped_single"
+        def group_sort_key(item):
+            gid, rows = item
+            merged_taxids = merged_taxid_string(rows)
+            first_tax = merged_taxids.split(";")[0] if merged_taxids else "NA"
+            if first_tax.isdigit():
+                tax_key = (0, int(first_tax))
             else:
-                group_type = "unmapped_signature"
+                tax_key = (0, first_tax) if first_tax != "NA" else (1, float("inf"))
+
+            selected_rep = next((r for r in rows if r["Selected"] == "yes"), rows[0])
+            return (tax_key, gene_sort_value(selected_rep["GeneID"]), gid)
+
+        for group_id, group_rows in sorted(groups.items(), key=group_sort_key):
+            proteins = sorted({r["sseqid"] for r in group_rows})
+            selected_rep = next((r for r in group_rows if r["Selected"] == "yes"), None)
+
+            if selected_rep is None:
+                selected_rep_id = "NA"
+                selected_reason = "NA"
+                group_type = "unassigned"
+            else:
+                selected_rep_id = selected_rep["sseqid"]
+                selected_reason = selected_rep["Selection_reason"]
+
+                if selected_rep["GeneID"] != "NA":
+                    group_type = "mapped_gene"
+                elif len(proteins) == 1:
+                    group_type = "unmapped_single"
+                else:
+                    group_type = "unmapped_signature"
+
+            taxid_str = merged_taxid_string(group_rows)
+            display_group_id = selected_rep["GeneID"] if (selected_rep and selected_rep["GeneID"] != "NA") else group_id
 
             out.write(
-                f"{group_type}\t{staxid}\t{sig}\t{len(proteins)}\t"
-                f"{','.join(proteins)}\t{selected_rep}\t{selected_reason}\n"
+                f"{group_type}\t{taxid_str}\t{display_group_id}\t{len(proteins)}\t"
+                f"{','.join(proteins)}\t{selected_rep_id}\t{selected_reason}\n"
             )
 
 
 def write_table_summary(all_rows, selected_rows, out_path):
-    """
-    Write summary statistics for table mode.
-    """
+    """Write summary statistics for table mode."""
     status(f"Writing: {out_path}")
 
     total_rows = len(all_rows)
@@ -802,8 +866,8 @@ def write_table_summary(all_rows, selected_rows, out_path):
     for r in selected_rows:
         reason_counts[r["Selection_reason"]] += 1
 
-    unique_genes_selected = len({
-        (r["staxids"].strip(), r["GeneID"])
+    unique_mapped_groups_selected = len({
+        r["Representative_of"]
         for r in selected_rows
         if r["GeneID"] != "NA"
     })
@@ -817,16 +881,14 @@ def write_table_summary(all_rows, selected_rows, out_path):
         f.write(f"Selected representatives:\t{total_selected}\n")
         f.write(f"Selected mapped representatives:\t{selected_mapped}\n")
         f.write(f"Selected unmapped representatives:\t{selected_unmapped}\n")
-        f.write(f"Unique mapped gene groups selected:\t{unique_genes_selected}\n")
+        f.write(f"Unique mapped gene groups selected:\t{unique_mapped_groups_selected}\n")
         f.write("\nSelected representatives by reason:\n")
         for reason in sorted(reason_counts):
             f.write(f"{reason}\t{reason_counts[reason]}\n")
 
 
 def run_table_mode(table_file, gene_file, prefix):
-    """
-    Execute table mode workflow.
-    """
+    """Execute table mode workflow."""
     sseqids = read_subject_ids_from_table(table_file)
     mapping, match_type = build_gene_mapping(sseqids, gene_file)
     rows = read_full_table(table_file, mapping, match_type)
@@ -895,6 +957,14 @@ def parse_args():
             "  - exact accession -> GeneID match is attempted first\n"
             "  - if exact match fails, version-stripped matching is attempted\n"
             "    Example: XP_015836279.1 and XP_015836279.2 both fallback to XP_015836279\n\n"
+            "Taxonomy-aware behavior in table mode:\n"
+            "  - if staxids contains multiple taxids, all of them are considered\n"
+            "  - two rows are considered the same taxonomic context if they share\n"
+            "    at least one taxid\n"
+            "  - this overlap-aware rule is used for:\n"
+            "      * grouping mapped proteins with the same GeneID\n"
+            "      * comparing unmapped proteins to mapped representatives\n"
+            "      * collapsing redundancy among unmapped proteins\n\n"
             "Outputs in list mode (-l):\n"
             "  <prefix>.protein_to_gene.tsv\n"
             "  <prefix>.isoform_groups.tsv\n"
@@ -909,7 +979,7 @@ def parse_args():
             "Notes:\n"
             "  - Outside RefSeq, many proteins do not have GeneID mappings.\n"
             "  - In table mode, unmapped proteins are heuristically grouped using:\n"
-            "      staxids + slen + sstart + send + scovhsp\n"
+            "      taxid overlap + identical (slen, sstart, send, scovhsp)\n"
             "  - This is intended to reduce redundancy, not to define true transcript isoforms.\n"
         ),
         formatter_class=argparse.RawTextHelpFormatter
@@ -940,9 +1010,7 @@ def parse_args():
 
 
 def main():
-    """
-    Main entry point.
-    """
+    """Main entry point."""
     args = parse_args()
 
     input_path = args.l if args.l else args.t
