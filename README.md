@@ -39,12 +39,15 @@ Annotated tables with GeneID mapping and selection decisions
 Filtered non-redundant datasets (one representative per gene/isoform-like group)
 Group reports linking each representative to all related protein accessions
 Summary statistics describing mapping success and redundancy reduction
+
 🔹 Use cases
+
 Phylogenetic dataset preparation
 Domain architecture comparison
 Homology-based gene discovery
 Reduction of redundancy in large protein search outputs
 Analysis of poorly annotated or non-model organisms
+
 🔹 Key idea
 
 This tool bridges the gap between:
