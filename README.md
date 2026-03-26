@@ -31,7 +31,7 @@ This reflects the assumption that proteins exhibiting identical alignment behavi
 
 The tool also resolves common issues with accession versioning (e.g., .1, .2) by implementing a fallback strategy that maps proteins based on version-stripped accessions when exact matches are unavailable.
 
-🧬 Output
+🔹 Output
 
 The pipeline produces:
 
@@ -39,13 +39,13 @@ Annotated tables with GeneID mapping and selection decisions
 Filtered non-redundant datasets (one representative per gene/isoform-like group)
 Group reports linking each representative to all related protein accessions
 Summary statistics describing mapping success and redundancy reduction
-🎯 Use cases
+🔹 Use cases
 Phylogenetic dataset preparation
 Domain architecture comparison
 Homology-based gene discovery
 Reduction of redundancy in large protein search outputs
 Analysis of poorly annotated or non-model organisms
-🧠 Key idea
+🔹 Key idea
 
 This tool bridges the gap between:
 
@@ -59,4 +59,4 @@ If you want, I can also give you:
 
 a short tagline
 a README.md version with badges
-or a methods paragraph for your paper 👍
+or a methods paragraph for your paper 
